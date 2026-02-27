@@ -141,6 +141,42 @@ def get_vendor_ai_explanation(gstin: str):
         "explanation": explanation
     }
 
+@app.get("/graph")
+def get_graph_data():
+    """Return all nodes and edges for frontend graph visualization."""
+    nodes = []
+    edges = []
+
+    for node, attrs in G.nodes(data=True):
+        node_data = {"id": node, "type": attrs.get("type", "unknown")}
+        if attrs.get("type") == "vendor":
+            summary = compute_vendor_risk(G, node)
+            node_data.update({
+                "name": attrs.get("name", ""),
+                "risk_level": summary["risk_level"],
+                "risk_score": summary["risk_score"],
+                "missed_filings": attrs.get("missed_filings", 0),
+                "suspicious_count": len(summary["suspicious_invoices"]),
+            })
+        elif attrs.get("type") == "invoice":
+            is_suspicious = bool(attrs.get("claimed_by_buyer") and not attrs.get("reported_by_seller"))
+            node_data.update({
+                "amount": attrs.get("amount", 0),
+                "tax": attrs.get("tax", 0),
+                "seller_gstin": attrs.get("seller_gstin", ""),
+                "buyer_gstin": attrs.get("buyer_gstin", ""),
+                "reported_by_seller": attrs.get("reported_by_seller", False),
+                "claimed_by_buyer": attrs.get("claimed_by_buyer", False),
+                "is_suspicious": is_suspicious,
+            })
+        nodes.append(node_data)
+
+    for source, target in G.edges():
+        edges.append({"source": source, "target": target})
+
+    return {"nodes": nodes, "edges": edges}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

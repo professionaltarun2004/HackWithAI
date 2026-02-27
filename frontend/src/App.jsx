@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import GraphVisualization from './GraphVisualization';
 import './index.css';
 
 function App() {
+    const [activeTab, setActiveTab] = useState('table'); // 'table' or 'graph'
+
     const [vendors, setVendors] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -84,8 +87,42 @@ function App() {
         return 'badge';
     };
 
+    const handleSelectVendorFromGraph = (gstin) => {
+        setSelectedGstin(gstin);
+        setActiveTab('table');
+    };
+
     return (
-        <div className="container">
+        <div className="app-wrapper">
+            {/* Top navigation tabs */}
+            <nav className="app-nav">
+                <h1 className="app-title">🛡️ GST Risk Dashboard</h1>
+                <div className="tab-bar">
+                    <button
+                        className={`tab-btn ${activeTab === 'table' ? 'tab-active' : ''}`}
+                        onClick={() => setActiveTab('table')}
+                    >
+                        📋 Vendors &amp; Details
+                    </button>
+                    <button
+                        className={`tab-btn ${activeTab === 'graph' ? 'tab-active' : ''}`}
+                        onClick={() => setActiveTab('graph')}
+                    >
+                        🔗 Transaction Graph
+                    </button>
+                </div>
+            </nav>
+
+            {/* Graph Tab */}
+            {activeTab === 'graph' && (
+                <div className="graph-page">
+                    <GraphVisualization onSelectVendor={handleSelectVendorFromGraph} />
+                </div>
+            )}
+
+            {/* Table Tab */}
+            {activeTab === 'table' && (
+                <div className="container">
             <div className="left-panel panel">
                 <h2>Vendors List</h2>
                 {loading && <p>Loading vendors...</p>}
@@ -228,6 +265,8 @@ function App() {
                     </div>
                 )}
             </div>
+            </div>
+            )}
         </div>
     );
 }
