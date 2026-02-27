@@ -64,30 +64,88 @@ def build_graph(vendors, invoices):
         
     return G
 
+def detect_network_patterns(G, gstin: str) -> dict:
+    """Detect circular trading and high-risk neighbours for a vendor."""
+    # Build a vendor-only directed graph for cycle detection
+    vendor_graph = nx.DiGraph()
+    for node, attrs in G.nodes(data=True):
+        if attrs.get("type") == "vendor":
+            vendor_graph.add_node(node, **attrs)
+
+    # Add vendor-to-vendor edges via invoice nodes
+    for inv_node, attrs in G.nodes(data=True):
+        if attrs.get("type") == "invoice":
+            seller = attrs.get("seller_gstin")
+            buyer = attrs.get("buyer_gstin")
+            if seller and buyer and seller in vendor_graph and buyer in vendor_graph:
+                vendor_graph.add_edge(seller, buyer)
+
+    # Detect if gstin is part of any simple cycle (length up to 6)
+    possible_circular_trading = False
+    try:
+        cycles = list(nx.simple_cycles(vendor_graph, length_bound=6))
+        possible_circular_trading = any(gstin in cycle for cycle in cycles)
+    except Exception:
+        pass
+
+    # Count neighbouring vendors with missed_filings >= 2
+    neighbour_gstins: set = set()
+    for node in G.predecessors(gstin):
+        if G.nodes[node].get("type") == "invoice":
+            seller = G.nodes[node].get("seller_gstin")
+            if seller and seller != gstin:
+                neighbour_gstins.add(seller)
+    for node in G.successors(gstin):
+        if G.nodes[node].get("type") == "invoice":
+            buyer = G.nodes[node].get("buyer_gstin")
+            if buyer and buyer != gstin:
+                neighbour_gstins.add(buyer)
+
+    high_risk_neighbours = sum(
+        1 for n in neighbour_gstins
+        if n in G.nodes and G.nodes[n].get("missed_filings", 0) >= 2
+    )
+
+    return {
+        "possible_circular_trading": possible_circular_trading,
+        "high_risk_neighbours": high_risk_neighbours,
+    }
+
+
 def compute_vendor_risk(G, gstin):
     # Get vendor attributes
     attrs = G.nodes[gstin]
     vendor_name = attrs.get("name", "")
     missed_filings = attrs.get("missed_filings", 0)
-    
+
     # Incoming invoices (vendor is buyer)
     incoming_nodes = list(G.predecessors(gstin))
     incoming_invoices = [n for n in incoming_nodes if G.nodes[n].get("type") == "invoice"]
-    
+
     # Outgoing invoices (vendor is seller)
     outgoing_nodes = list(G.successors(gstin))
     outgoing_invoices = [n for n in outgoing_nodes if G.nodes[n].get("type") == "invoice"]
-    
+
     # Find suspicious invoices (claimed by buyer but not reported by seller)
     suspicious_invoices = []
     for inv_id in incoming_invoices:
         inv_attrs = G.nodes[inv_id]
         if inv_attrs.get("claimed_by_buyer") and not inv_attrs.get("reported_by_seller"):
             suspicious_invoices.append(inv_id)
-            
-    # Calculate risk score
-    risk_score = len(suspicious_invoices) * 20 + missed_filings * 10
-    
+
+    # Detect network patterns
+    patterns = detect_network_patterns(G, gstin)
+    possible_circular_trading = patterns["possible_circular_trading"]
+    high_risk_neighbours = patterns["high_risk_neighbours"]
+
+    # Calculate risk score (updated weights)
+    risk_score = (
+        len(suspicious_invoices) * 25
+        + missed_filings * 10
+        + high_risk_neighbours * 5
+        + (20 if possible_circular_trading else 0)
+    )
+
     # Determine risk level
     if risk_score >= 60:
         risk_level = "high"
@@ -95,7 +153,7 @@ def compute_vendor_risk(G, gstin):
         risk_level = "medium"
     else:
         risk_level = "low"
-        
+
     return {
         "gstin": gstin,
         "name": vendor_name,
@@ -104,7 +162,9 @@ def compute_vendor_risk(G, gstin):
         "missed_filings": missed_filings,
         "total_incoming": len(incoming_invoices),
         "total_outgoing": len(outgoing_invoices),
-        "suspicious_invoices": suspicious_invoices
+        "suspicious_invoices": suspicious_invoices,
+        "possible_circular_trading": possible_circular_trading,
+        "high_risk_neighbours": high_risk_neighbours,
     }
 
 def get_all_vendor_summaries(G):

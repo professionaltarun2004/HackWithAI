@@ -1,9 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import GraphVisualization from './GraphVisualization';
+import MismatchList from './MismatchList';
+import VendorRiskBoard from './VendorRiskBoard';
+import { getVendors, getVendorDetail, getVendorRisk, triggerIngest } from './api';
 import './index.css';
 
 function App() {
-    const [activeTab, setActiveTab] = useState('table'); // 'table' or 'graph'
+    const [activeTab, setActiveTab] = useState('table');
 
     const [vendors, setVendors] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -14,25 +17,15 @@ function App() {
     const [detailLoading, setDetailLoading] = useState(false);
     const [detailError, setDetailError] = useState(null);
 
-    // New states for AI explanation
+    // AI explanation via vendor risk endpoint
     const [aiExplanation, setAiExplanation] = useState(null);
     const [aiLoading, setAiLoading] = useState(false);
     const [aiError, setAiError] = useState(null);
 
     useEffect(() => {
-        fetch('http://localhost:8000/vendors')
-            .then(res => {
-                if (!res.ok) throw new Error('Failed to fetch vendors');
-                return res.json();
-            })
-            .then(data => {
-                setVendors(data);
-                setLoading(false);
-            })
-            .catch(err => {
-                setError(err.message);
-                setLoading(false);
-            });
+        getVendors()
+            .then(data => { setVendors(data); setLoading(false); })
+            .catch(err => { setError(err.message); setLoading(false); });
     }, []);
 
     useEffect(() => {
@@ -43,47 +36,49 @@ function App() {
         setAiLoading(false);
         setAiError(null);
 
-        fetch(`http://localhost:8000/vendors/${selectedGstin}`)
-            .then(res => {
-                if (!res.ok) throw new Error('Failed to fetch vendor details');
-                return res.json();
-            })
+        getVendorDetail(selectedGstin)
             .then(data => {
                 setVendorDetail(data);
                 setDetailLoading(false);
+                // Auto-fetch AI explanation on vendor selection
+                setAiLoading(true);
+                getVendorRisk(selectedGstin)
+                    .then(riskData => {
+                        const reasons = riskData.reasons || [];
+                        const explanation = `Vendor "${riskData.name}" (${riskData.gstin}) has a risk score of ${riskData.risk_score}/100 (${riskData.risk_level}). ` +
+                            `Compliance score: ${riskData.compliance_score}%. ` +
+                            (reasons.length > 0 ? `Risk factors: ${reasons.join('; ')}.` : 'No risk factors detected.');
+                        setAiExplanation(explanation);
+                        setAiLoading(false);
+                    })
+                    .catch(() => { setAiError("Failed to generate explanation"); setAiLoading(false); });
             })
-            .catch(err => {
-                setDetailError(err.message);
-                setDetailLoading(false);
-            });
+            .catch(err => { setDetailError(err.message); setDetailLoading(false); });
     }, [selectedGstin]);
 
     const handleGenerateAi = () => {
         if (!selectedGstin) return;
-
         setAiLoading(true);
         setAiError(null);
         setAiExplanation(null);
 
-        fetch(`http://localhost:8000/vendors/${selectedGstin}/ai-explanation`)
-            .then(res => {
-                if (!res.ok) throw new Error('Failed to fetch AI explanation');
-                return res.json();
-            })
+        getVendorRisk(selectedGstin)
             .then(data => {
-                setAiExplanation(data.explanation);
+                const reasons = data.reasons || [];
+                const explanation = `Vendor "${data.name}" (${data.gstin}) has a risk score of ${data.risk_score}/100 (${data.risk_level}). ` +
+                    `Compliance score: ${data.compliance_score}%. ` +
+                    (reasons.length > 0 ? `Risk factors: ${reasons.join('; ')}.` : 'No risk factors detected.');
+                setAiExplanation(explanation);
                 setAiLoading(false);
             })
-            .catch(err => {
-                setAiError("Failed to generate explanation");
-                setAiLoading(false);
-            });
+            .catch(() => { setAiError("Failed to generate explanation"); setAiLoading(false); });
     };
 
     const getRiskBadgeClass = (level) => {
         if (level === 'low') return 'badge badge-low';
         if (level === 'medium') return 'badge badge-medium';
         if (level === 'high') return 'badge badge-high';
+        if (level === 'critical') return 'badge badge-critical';
         return 'badge';
     };
 
@@ -105,6 +100,18 @@ function App() {
                         📋 Vendors &amp; Details
                     </button>
                     <button
+                        className={`tab-btn ${activeTab === 'mismatches' ? 'tab-active' : ''}`}
+                        onClick={() => setActiveTab('mismatches')}
+                    >
+                        🔍 Mismatches
+                    </button>
+                    <button
+                        className={`tab-btn ${activeTab === 'risk' ? 'tab-active' : ''}`}
+                        onClick={() => setActiveTab('risk')}
+                    >
+                        🏆 Vendor Risk
+                    </button>
+                    <button
                         className={`tab-btn ${activeTab === 'graph' ? 'tab-active' : ''}`}
                         onClick={() => setActiveTab('graph')}
                     >
@@ -112,6 +119,12 @@ function App() {
                     </button>
                 </div>
             </nav>
+
+            {/* Mismatches Tab */}
+            {activeTab === 'mismatches' && <MismatchList />}
+
+            {/* Vendor Risk Tab */}
+            {activeTab === 'risk' && <VendorRiskBoard />}
 
             {/* Graph Tab */}
             {activeTab === 'graph' && (
@@ -195,6 +208,16 @@ function App() {
                                 <span className="stat-label">Total Outgoing</span>
                                 <span className="stat-value">{vendorDetail.total_outgoing}</span>
                             </div>
+                        </div>
+
+                        <div className="graph-patterns-section" style={{ marginBottom: '2rem', padding: '1rem', background: '#eef2ff', borderRadius: '0.5rem', border: '1px solid #c7d2fe' }}>
+                            <h4 style={{ marginTop: 0, color: '#3730a3' }}>Graph Patterns</h4>
+                            <p style={{ color: vendorDetail.possible_circular_trading ? '#b91c1c' : '#4b5563', fontWeight: vendorDetail.possible_circular_trading ? 'bold' : 'normal', margin: '0 0 0.5rem 0' }}>
+                                {vendorDetail.possible_circular_trading ? "⚠️ Possible circular trading pattern detected" : "✓ No circular trading pattern detected"}
+                            </p>
+                            <p style={{ color: vendorDetail.high_risk_neighbours > 0 ? '#b91c1c' : '#4b5563', fontWeight: vendorDetail.high_risk_neighbours > 0 ? 'bold' : 'normal', margin: 0 }}>
+                                {vendorDetail.high_risk_neighbours > 0 ? `⚠️ High-risk neighbouring vendors: ${vendorDetail.high_risk_neighbours}` : "✓ High-risk neighbouring vendors: 0"}
+                            </p>
                         </div>
 
                         <h4>Suspicious Invoices</h4>

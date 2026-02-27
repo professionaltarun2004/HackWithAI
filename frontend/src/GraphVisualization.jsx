@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as d3 from 'd3';
+import { getGraphData } from './api';
 
 const RISK_COLORS = {
     high: '#ef4444',
@@ -25,11 +26,7 @@ export default function GraphVisualization({ onSelectVendor }) {
     const [filter, setFilter] = useState('all'); // all, vendors, suspicious
 
     useEffect(() => {
-        fetch('http://localhost:8000/graph')
-            .then(res => {
-                if (!res.ok) throw new Error('Failed to fetch graph data');
-                return res.json();
-            })
+        getGraphData()
             .then(data => {
                 setGraphData(data);
                 setLoading(false);

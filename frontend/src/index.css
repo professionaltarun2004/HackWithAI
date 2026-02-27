@@ -115,6 +115,10 @@ tbody tr:hover {
   background-color: #ef4444;
 }
 
+.badge-critical {
+  background-color: #7f1d1d;
+}
+
 .detail-header {
   display: flex;
   justify-content: space-between;
