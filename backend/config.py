@@ -34,6 +34,9 @@ ARANGO_PASSWORD = os.getenv("ARANGO_PASSWORD", "")
 
 # Data paths
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
+# Uploaded CSVs are written here — kept separate so /ingest never touches them
+UPLOADS_DATA_DIR = os.path.join(DATA_DIR, "uploads")
+os.makedirs(UPLOADS_DATA_DIR, exist_ok=True)
 
 # CORS
 CORS_ORIGINS = os.getenv(

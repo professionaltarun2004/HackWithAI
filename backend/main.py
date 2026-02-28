@@ -22,6 +22,7 @@ from .config import (
     ARANGO_USER,
     ARANGO_PASSWORD,
     DATA_DIR,
+    UPLOADS_DATA_DIR,
     CORS_ORIGINS,
 )
 from .adapters import (
@@ -61,6 +62,14 @@ async def lifespan(application: FastAPI):
         logger.info("Graph is empty — loading seed data from %s", DATA_DIR)
         v, i = load_csv(DATA_DIR, adapter)
         logger.info("Loaded %d vendors, %d invoices", v, i)
+
+    # Re-apply any previously uploaded CSVs (survives server restarts)
+    import os, glob
+    upload_files = glob.glob(os.path.join(UPLOADS_DATA_DIR, "*.csv"))
+    if upload_files:
+        logger.info("Re-applying uploaded CSVs from %s", UPLOADS_DATA_DIR)
+        v2, i2 = load_csv(UPLOADS_DATA_DIR, adapter)
+        logger.info("Appended %d vendors, %d invoices from uploads", v2, i2)
 
     # Inject adapter into routes module
     routes.adapter = adapter

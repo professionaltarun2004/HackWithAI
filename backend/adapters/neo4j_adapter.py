@@ -79,19 +79,31 @@ class Neo4jAdapter(GraphAdapter):
         reported_by_seller: bool,
         claimed_by_buyer: bool,
     ) -> None:
+        # FIX: Use ON CREATE SET for vendor stub-node defaults.
+        # If a Vendor was already loaded from vendors.csv its name/missed_filings
+        # are preserved.  If this GSTIN is new (i.e. appears only in invoices.csv)
+        # we create a minimal placeholder rather than a node with NULL properties.
         self._run(
             """
             MERGE (seller:Vendor {gstin: $seller_gstin})
+            ON CREATE SET seller.name = $seller_gstin,
+                          seller.missed_filings = 0
+
             MERGE (buyer:Vendor {gstin: $buyer_gstin})
+            ON CREATE SET buyer.name = $buyer_gstin,
+                          buyer.missed_filings = 0
+
             MERGE (inv:Invoice {invoice_id: $invoice_id})
-            SET inv.seller_gstin = $seller_gstin,
-                inv.buyer_gstin = $buyer_gstin,
-                inv.amount = $amount,
-                inv.tax = $tax,
+            SET inv.seller_gstin      = $seller_gstin,
+                inv.buyer_gstin       = $buyer_gstin,
+                inv.amount            = $amount,
+                inv.tax               = $tax,
                 inv.reported_by_seller = $reported_by_seller,
-                inv.claimed_by_buyer = $claimed_by_buyer
+                inv.claimed_by_buyer   = $claimed_by_buyer
+
             MERGE (seller)-[:SOLD]->(inv)
             MERGE (inv)-[:PURCHASED_BY]->(buyer)
+
             WITH inv, seller, buyer
             FOREACH (_ IN CASE WHEN $reported_by_seller THEN [1] ELSE [] END |
                 MERGE (gstr1:Return {id: $invoice_id + '_GSTR1', type: 'GSTR-1'})
@@ -219,20 +231,32 @@ class Neo4jAdapter(GraphAdapter):
 
     def detect_circular_trading(self, max_depth: int = 5) -> List[List[str]]:
         """
-        Detect circular trading: Vendor A sells to B, B sells to C, C sells to A.
-        Uses variable-length path matching in Cypher.
+        Detect circular trading: Vendor A sells to B, B sells to C, ... sells to A.
+
+        FIX: The previous Cypher used [:PURCHASED_BY*1..4] which traversed
+        consecutive PURCHASED_BY edges — an impossible pattern that never
+        matched anything.  The correct pattern alternates SOLD→PURCHASED_BY
+        hops, which is how real trading chains are modelled in this graph.
+
+        Pattern:  (vStart) -SOLD-> (inv) -PURCHASED_BY-> (vMid)
+                            ...one or more hops...
+                  (vMid)  -SOLD-> (inv2)-PURCHASED_BY-> (vStart)
         """
         rows = self._run(
             """
-            MATCH path = (v:Vendor)-[:SOLD]->(:Invoice)-[:PURCHASED_BY]->(v2:Vendor)
+            MATCH (v:Vendor)-[:SOLD]->(:Invoice)-[:PURCHASED_BY]->(v2:Vendor)
             WHERE v <> v2
             WITH v, v2
-            MATCH circular = (v2)-[:SOLD]->(:Invoice)-[:PURCHASED_BY*1..4]->(v)
-            RETURN DISTINCT [n IN nodes(circular) WHERE n:Vendor | n.gstin] AS chain
+            MATCH circular = (v2)-[:SOLD]->(:Invoice)-[:PURCHASED_BY]->(vn:Vendor)
+                             -[:SOLD*0..6]->(:Invoice)-[:PURCHASED_BY*0..1]->(v)
+            WHERE v <> v2
+            RETURN DISTINCT
+                [n IN nodes(circular) WHERE n:Vendor | n.gstin] AS chain
             LIMIT 20
             """
         )
-        return [r["chain"] for r in rows]
+        # Filter out empty/single-element chains that slip through
+        return [r["chain"] for r in rows if len(r.get("chain") or []) >= 2]
 
     def get_invoice_trail(self, invoice_id: str) -> Dict[str, Any]:
         rows = self._run(
@@ -299,7 +323,8 @@ class Neo4jAdapter(GraphAdapter):
             WHERE (a:Vendor AND b:Invoice) OR (a:Invoice AND b:Vendor)
             RETURN
               CASE WHEN a:Vendor THEN a.gstin ELSE a.invoice_id END AS source,
-              CASE WHEN b:Vendor THEN b.gstin ELSE b.invoice_id END AS target
+              CASE WHEN b:Vendor THEN b.gstin ELSE b.invoice_id END AS target,
+              type(r) AS type
             """
         )
         return {

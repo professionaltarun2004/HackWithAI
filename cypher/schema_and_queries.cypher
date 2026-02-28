@@ -130,3 +130,134 @@ MATCH (m:Invoice) WHERE m.reported_by_seller <> m.claimed_by_buyer
 WITH vendors, invoices, count(m) AS mismatches
 MATCH (s:Invoice) WHERE s.claimed_by_buyer = true AND s.reported_by_seller = false
 RETURN vendors, invoices, mismatches, count(s) AS suspicious;
+
+
+// =============================================================
+// 8. DIAGNOSTIC QUERIES — run these to audit graph health
+// =============================================================
+
+// ── 8a. Floating invoices (no :SOLD relationship — no known seller) ──────────
+MATCH (inv:Invoice)
+WHERE NOT ()-[:SOLD]->(inv)
+RETURN inv.invoice_id AS floating_invoice,
+       inv.seller_gstin,
+       inv.buyer_gstin,
+       inv.amount,
+       'missing SOLD edge' AS problem
+ORDER BY inv.invoice_id;
+
+// ── 8b. Invoices missing their buyer edge (:PURCHASED_BY) ───────────────────
+MATCH (inv:Invoice)
+WHERE NOT (inv)-[:PURCHASED_BY]->()
+RETURN inv.invoice_id AS floating_invoice,
+       inv.seller_gstin,
+       inv.buyer_gstin,
+       inv.amount,
+       'missing PURCHASED_BY edge' AS problem
+ORDER BY inv.invoice_id;
+
+// ── 8c. Invoices missing BOTH edges (completely orphaned) ───────────────────
+MATCH (inv:Invoice)
+WHERE NOT ()-[:SOLD]->(inv)
+  AND NOT (inv)-[:PURCHASED_BY]->()
+RETURN inv.invoice_id, inv.seller_gstin, inv.buyer_gstin,
+       'fully orphaned — no edges at all' AS problem;
+
+// ── 8d. Vendor nodes without any invoice relationships ──────────────────────
+MATCH (v:Vendor)
+WHERE NOT (v)-[:SOLD]->()
+  AND NOT ()-[:PURCHASED_BY]->(v)
+RETURN v.gstin, v.name, v.missed_filings,
+       'isolated vendor — no invoices' AS problem
+ORDER BY v.gstin;
+
+// ── 8e. Stub vendor nodes (created from invoice data, missing proper name) ───
+//  These are vendors whose name equals their GSTIN (placeholder set by adapter)
+MATCH (v:Vendor)
+WHERE v.name = v.gstin
+RETURN v.gstin, v.name, v.missed_filings,
+       'stub node — name not loaded from vendors.csv' AS problem
+ORDER BY v.gstin;
+
+// ── 8f. Duplicate GSTIN detection ───────────────────────────────────────────
+//  Should return zero rows if the UNIQUE constraint is enforced correctly.
+MATCH (v:Vendor)
+WITH v.gstin AS gstin, count(*) AS cnt
+WHERE cnt > 1
+RETURN gstin, cnt AS duplicate_count
+ORDER BY cnt DESC;
+
+// ── 8g. Invoice relationship cardinality check ───────────────────────────────
+//  Each invoice must have exactly 1 :SOLD and 1 :PURCHASED_BY edge.
+MATCH (inv:Invoice)
+OPTIONAL MATCH ()-[s:SOLD]->(inv)
+OPTIONAL MATCH (inv)-[p:PURCHASED_BY]->()
+WITH inv.invoice_id AS invoice_id,
+     count(DISTINCT s) AS sold_count,
+     count(DISTINCT p) AS purchased_count
+WHERE sold_count <> 1 OR purchased_count <> 1
+RETURN invoice_id, sold_count, purchased_count,
+       CASE
+         WHEN sold_count = 0    THEN 'missing seller edge'
+         WHEN sold_count > 1    THEN 'multiple sellers — data integrity error'
+         WHEN purchased_count = 0 THEN 'missing buyer edge'
+         WHEN purchased_count > 1 THEN 'multiple buyers — data integrity error'
+         ELSE 'unknown anomaly'
+       END AS diagnosis
+ORDER BY invoice_id;
+
+// ── 8h. GSTIN cross-check: invoice properties vs graph edges ─────────────────
+//  Confirms that inv.seller_gstin / inv.buyer_gstin match the connected Vendors.
+MATCH (seller:Vendor)-[:SOLD]->(inv:Invoice)-[:PURCHASED_BY]->(buyer:Vendor)
+WHERE seller.gstin <> inv.seller_gstin
+   OR buyer.gstin  <> inv.buyer_gstin
+RETURN inv.invoice_id,
+       seller.gstin AS edge_seller, inv.seller_gstin AS prop_seller,
+       buyer.gstin  AS edge_buyer,  inv.buyer_gstin  AS prop_buyer,
+       'edge GSTIN does not match invoice property' AS problem;
+
+
+// =============================================================
+// 9. CORRECTIVE CYPHER — repair a floating invoice if found
+// =============================================================
+
+// Repair: attach a floating invoice to its seller/buyer using the
+// seller_gstin / buyer_gstin properties already stored on the node.
+MATCH (inv:Invoice)
+WHERE NOT ()-[:SOLD]->(inv)
+MERGE (seller:Vendor {gstin: inv.seller_gstin})
+ON CREATE SET seller.name = inv.seller_gstin, seller.missed_filings = 0
+MERGE (seller)-[:SOLD]->(inv);
+
+MATCH (inv:Invoice)
+WHERE NOT (inv)-[:PURCHASED_BY]->()
+MERGE (buyer:Vendor {gstin: inv.buyer_gstin})
+ON CREATE SET buyer.name = inv.buyer_gstin, buyer.missed_filings = 0
+MERGE (inv)-[:PURCHASED_BY]->(buyer);
+
+
+// =============================================================
+// 10. RECOMMENDED BEST-PRACTICE SCHEMA (reference)
+// =============================================================
+//
+// Node labels:
+//   Vendor  { gstin: String UNIQUE, name: String, missed_filings: Int }
+//   Invoice { invoice_id: String UNIQUE, seller_gstin: String,
+//             buyer_gstin: String, amount: Float, tax: Float,
+//             reported_by_seller: Boolean, claimed_by_buyer: Boolean }
+//   Return  { id: String UNIQUE, type: 'GSTR-1'|'GSTR-2B' }
+//
+// Relationships (all directed):
+//   (Vendor)  -[:SOLD]--------->  (Invoice)   seller issued this invoice
+//   (Invoice) -[:PURCHASED_BY]-> (Vendor)    buyer received this invoice
+//   (Vendor)  -[:FILED]--------> (Return)    vendor filed this return
+//   (Return)  -[:REPORTS]------> (Invoice)   GSTR-1 reports this invoice
+//   (Return)  -[:CLAIMS]-------> (Invoice)   GSTR-2B claims ITC for invoice
+//
+// Key invariants:
+//   1. UNIQUE constraint on Vendor.gstin  — enforced via CREATE CONSTRAINT
+//   2. UNIQUE constraint on Invoice.invoice_id — enforced via CREATE CONSTRAINT
+//   3. Every Invoice has exactly 1 :SOLD and 1 :PURCHASED_BY edge
+//   4. All MERGE on Vendor uses {gstin:...} (the unique key) — never by name
+//   5. Invoice-side stubs use ON CREATE SET so existing good data is preserved
+

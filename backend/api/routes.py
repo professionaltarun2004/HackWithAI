@@ -2,7 +2,10 @@
 FastAPI routes — all REST endpoints for the React dashboard.
 """
 
-from fastapi import APIRouter, HTTPException
+import os
+import glob
+
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 
 from ..adapters.base import GraphAdapter
 from ..services.reconciliation import reconcile_all_invoices, get_invoice_audit_trail
@@ -50,7 +53,19 @@ def health_check():
 
 @router.post("/ingest", response_model=IngestResponse)
 def ingest_data():
-    """(Re-)load CSV data into the graph. Clears existing data first."""
+    """
+    Reset to default data.
+    Removes all previously uploaded CSVs from the uploads directory,
+    clears the graph, and reloads only the static seed data.
+    """
+    # 1. Wipe upload directory so it no longer contributes
+    for f in glob.glob(os.path.join(config.UPLOADS_DATA_DIR, "*.csv")):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+    # 2. Reload only the static default data
     adapter.clear()
     adapter.create_constraints()
     v_count, i_count = load_csv(config.DATA_DIR, adapter)
@@ -165,3 +180,47 @@ def get_graph_data():
             node["suspicious_count"] = vr.get("suspicious_invoice_count", 0)
 
     return data
+
+
+# ── Real-time CSV upload ───────────────────────────────────
+
+@router.post("/realtime/upload-csv")
+async def upload_csv(
+    type: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """
+    Accept a raw CSV upload for vendors or invoices.
+
+    Saves the file to the UPLOADS directory (never overwrites static defaults),
+    then APPENDS the new rows to the live graph without clearing existing data.
+    This means the default vendors/invoices stay visible alongside the uploaded ones.
+
+    Form fields:
+      type — "vendors" | "invoices"
+      file — the CSV file (text/csv)
+    """
+    if type not in ("vendors", "invoices"):
+        raise HTTPException(
+            status_code=400,
+            detail="'type' must be 'vendors' or 'invoices'",
+        )
+
+    filename = f"{type}.csv"
+    # Always write to the uploads subdirectory — never touch the static defaults
+    dest = os.path.join(config.UPLOADS_DATA_DIR, filename)
+
+    content = await file.read()
+    with open(dest, "wb") as fh:
+        fh.write(content)
+
+    # Append-only: load ONLY the uploads directory without clearing.
+    # upsert_vendor / upsert_invoice use MERGE so duplicates are handled safely.
+    v_count, i_count = load_csv(config.UPLOADS_DATA_DIR, adapter)
+
+    return {
+        "status": "ok",
+        "file_saved": filename,
+        "vendors_loaded": v_count,
+        "invoices_loaded": i_count,
+    }

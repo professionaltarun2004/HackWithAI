@@ -1,12 +1,217 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import GraphVisualization from './GraphVisualization';
 import MismatchList from './MismatchList';
 import VendorRiskBoard from './VendorRiskBoard';
-import { getVendors, getVendorDetail, getVendorRisk, triggerIngest } from './api';
+import { getVendors, getVendorDetail, getVendorRisk, triggerIngest, uploadCsv } from './api';
 import './index.css';
+
+// ── Toast hook ────────────────────────────────────────────
+let _toastId = 0;
+function useToasts() {
+    const [toasts, setToasts] = useState([]);
+    const addToast = useCallback((message, type = 'success') => {
+        const id = ++_toastId;
+        setToasts(prev => [...prev, { id, message, type }]);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+    }, []);
+    return { toasts, addToast };
+}
+
+// ── UploadCsvTab component ────────────────────────────────
+function UploadCsvTab({ onRefresh }) {
+    const [vendorsFile, setVendorsFile]     = useState(null);
+    const [invoicesFile, setInvoicesFile]   = useState(null);
+    const [uploadingVendors, setUploadingVendors]   = useState(false);
+    const [uploadingInvoices, setUploadingInvoices] = useState(false);
+    const [reingesting, setReingesting]     = useState(false);
+    const [lastUploadTime, setLastUploadTime] = useState(null);
+    const { toasts, addToast } = useToasts();
+
+    const anyBusy = uploadingVendors || uploadingInvoices || reingesting;
+
+    const handleUpload = async (type, file, setUploading) => {
+        if (!file) return;
+        setUploading(true);
+        try {
+            const content = await file.text();   // raw bytes → string, no parsing
+            await uploadCsv(type, content);
+            setLastUploadTime(new Date().toLocaleTimeString());
+            addToast(
+                `${type === 'vendors' ? 'Vendors' : 'Invoices'} CSV uploaded successfully`,
+                'success'
+            );
+            onRefresh();
+        } catch (err) {
+            addToast(err.message, 'error');
+        } finally {
+            setUploading(false);
+        }
+    };
+
+    const handleReingest = async () => {
+        setReingesting(true);
+        try {
+            await triggerIngest();
+            setLastUploadTime(new Date().toLocaleTimeString());
+            addToast('Reset complete. Showing only the original default data.', 'success');
+            onRefresh();
+        } catch (err) {
+            addToast(err.message, 'error');
+        } finally {
+            setReingesting(false);
+        }
+    };
+
+    return (
+        <div className="upload-page">
+            {/* Toast container */}
+            <div className="toast-container">
+                {toasts.map(t => (
+                    <div key={t.id} className={`toast toast-${t.type}`}>
+                        {t.type === 'success' ? '✅' : '❌'} {t.message}
+                    </div>
+                ))}
+            </div>
+
+            <div className="upload-container">
+                <div className="upload-header-row">
+                    <div className="upload-title-group">
+                        <h2 className="upload-heading">Upload CSVs</h2>
+                        {lastUploadTime && (
+                            <span className="upload-last-time">Last updated: {lastUploadTime}</span>
+                        )}
+                    </div>
+                    <div className="upload-tooltip-wrapper">
+                        <span className="upload-help-icon" tabIndex={0}>?</span>
+                        <div className="upload-tooltip-box">
+                            Upload new CSVs in the same column format as the default vendors.csv and
+                            invoices.csv. The new rows are ADDED to the existing graph — the
+                            original vendors and invoices are always kept. Press "Reset to Default
+                            Data" to remove your uploads and return to the original dataset.
+                        </div>
+                    </div>
+                </div>
+
+                <p className="upload-subtext">
+                    Upload a new <code>vendors.csv</code> or <code>invoices.csv</code>. The backend
+                    persists the file and re-ingests immediately — all tabs refresh automatically.
+                </p>
+
+                <div className="upload-cards">
+                    {/* ── Vendors card ── */}
+                    <div className="upload-card">
+                        <div className="upload-card-header">
+                            <span className="upload-card-icon">🏢</span>
+                            <h3>Vendors CSV</h3>
+                        </div>
+                        <p className="upload-card-hint">
+                            Required columns: <code>gstin</code>, <code>name</code>,{' '}
+                            <code>missed_filings</code>
+                        </p>
+                        <label className="upload-file-label">
+                            <input
+                                type="file"
+                                accept=".csv,text/csv"
+                                className="upload-file-input"
+                                disabled={anyBusy}
+                                onChange={e => setVendorsFile(e.target.files[0] || null)}
+                            />
+                            {vendorsFile
+                                ? <span className="upload-file-name">📄 {vendorsFile.name}</span>
+                                : <span className="upload-file-placeholder">Choose vendors.csv…</span>
+                            }
+                        </label>
+                        {uploadingVendors && (
+                            <div className="upload-progress-bar">
+                                <div className="upload-progress-fill" />
+                            </div>
+                        )}
+                        <button
+                            className="upload-btn"
+                            disabled={!vendorsFile || anyBusy}
+                            onClick={() => handleUpload('vendors', vendorsFile, setUploadingVendors)}
+                        >
+                            {uploadingVendors
+                                ? <><span className="upload-spinner" /> Uploading…</>
+                                : 'Upload vendors.csv'
+                            }
+                        </button>
+                    </div>
+
+                    {/* ── Invoices card ── */}
+                    <div className="upload-card">
+                        <div className="upload-card-header">
+                            <span className="upload-card-icon">🧾</span>
+                            <h3>Invoices CSV</h3>
+                        </div>
+                        <p className="upload-card-hint">
+                            Required columns: <code>invoice_id</code>, <code>seller_gstin</code>,{' '}
+                            <code>buyer_gstin</code>, <code>amount</code>, <code>tax</code>,{' '}
+                            <code>reported_by_seller</code>, <code>claimed_by_buyer</code>
+                        </p>
+                        <label className="upload-file-label">
+                            <input
+                                type="file"
+                                accept=".csv,text/csv"
+                                className="upload-file-input"
+                                disabled={anyBusy}
+                                onChange={e => setInvoicesFile(e.target.files[0] || null)}
+                            />
+                            {invoicesFile
+                                ? <span className="upload-file-name">📄 {invoicesFile.name}</span>
+                                : <span className="upload-file-placeholder">Choose invoices.csv…</span>
+                            }
+                        </label>
+                        {uploadingInvoices && (
+                            <div className="upload-progress-bar">
+                                <div className="upload-progress-fill" />
+                            </div>
+                        )}
+                        <button
+                            className="upload-btn"
+                            disabled={!invoicesFile || anyBusy}
+                            onClick={() => handleUpload('invoices', invoicesFile, setUploadingInvoices)}
+                        >
+                            {uploadingInvoices
+                                ? <><span className="upload-spinner" /> Uploading…</>
+                                : 'Upload invoices.csv'
+                            }
+                        </button>
+                    </div>
+                </div>
+
+                {/* ── Re-ingest strip ── */}
+                <div className="upload-reingest-strip">
+                    <div className="upload-reingest-text">
+                        <strong>Reset to Default Data</strong>
+                        <span>Removes all uploaded CSVs and restores only the original static vendors &amp; invoices.</span>
+                    </div>
+                    <button
+                        className="upload-reingest-btn"
+                        disabled={anyBusy}
+                        onClick={handleReingest}
+                    >
+                        {reingesting
+                            ? <><span className="upload-spinner upload-spinner-dark" /> Re-ingesting…</>
+                            : '🔄 Reset / Re-ingest'
+                        }
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
 
 function App() {
     const [activeTab, setActiveTab] = useState('table');
+
+    // ── Debounced refresh key — incrementing remounts child components ──
+    const [refreshKey, setRefreshKey] = useState(0);
+    const _debounceRef = useRef(null);
+    const triggerRefresh = useCallback(() => {
+        if (_debounceRef.current) clearTimeout(_debounceRef.current);
+        _debounceRef.current = setTimeout(() => setRefreshKey(k => k + 1), 300);
+    }, []);
 
     const [vendors, setVendors] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -23,10 +228,12 @@ function App() {
     const [aiError, setAiError] = useState(null);
 
     useEffect(() => {
+        setLoading(true);
+        setError(null);
         getVendors()
             .then(data => { setVendors(data); setLoading(false); })
             .catch(err => { setError(err.message); setLoading(false); });
-    }, []);
+    }, [refreshKey]);
 
     useEffect(() => {
         if (!selectedGstin) return;
@@ -117,20 +324,31 @@ function App() {
                     >
                         🔗 Transaction Graph
                     </button>
+                    <button
+                        className={`tab-btn ${activeTab === 'upload' ? 'tab-active' : ''}`}
+                        onClick={() => setActiveTab('upload')}
+                    >
+                        📤 Upload CSVs
+                    </button>
                 </div>
             </nav>
 
             {/* Mismatches Tab */}
-            {activeTab === 'mismatches' && <MismatchList />}
+            {activeTab === 'mismatches' && <MismatchList key={refreshKey} />}
 
             {/* Vendor Risk Tab */}
-            {activeTab === 'risk' && <VendorRiskBoard />}
+            {activeTab === 'risk' && <VendorRiskBoard key={refreshKey} />}
 
-            {/* Graph Tab */}
+            {/* Graph Tab — "computing…" overlay handled by GraphVisualization itself */}
             {activeTab === 'graph' && (
                 <div className="graph-page">
-                    <GraphVisualization onSelectVendor={handleSelectVendorFromGraph} />
+                    <GraphVisualization key={refreshKey} onSelectVendor={handleSelectVendorFromGraph} />
                 </div>
+            )}
+
+            {/* Upload CSVs Tab */}
+            {activeTab === 'upload' && (
+                <UploadCsvTab onRefresh={triggerRefresh} />
             )}
 
             {/* Table Tab */}

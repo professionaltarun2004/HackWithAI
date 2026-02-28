@@ -70,7 +70,7 @@ export default function GraphVisualization({ onSelectVendor }) {
         svg.selectAll('*').remove();
 
         const container = containerRef.current;
-        const width = container ? container.clientWidth : 1000;
+        const width = (container && container.clientWidth > 100) ? container.clientWidth : 900;
         const height = 600;
 
         svg.attr('viewBox', `0 0 ${width} ${height}`)
@@ -141,16 +141,18 @@ export default function GraphVisualization({ onSelectVendor }) {
         const nodeMap = {};
         nodes.forEach(n => { nodeMap[n.id] = n; });
 
+        // ── Force simulation ──────────────────────────────────────
+        // Key tuning: charge must be low enough that forceCenter wins.
+        // With 50 nodes:  charge=-150, linkDist=80, collision=20 keeps
+        // everything together instead of vendors flying to the perimeter.
         const simulation = d3.forceSimulation(nodes)
-            .force('link', d3.forceLink(links).id(d => d.id).distance(d => {
-                // Longer distance for vendor-to-vendor paths
-                return 120;
-            }))
-            .force('charge', d3.forceManyBody().strength(-400))
+            .force('link', d3.forceLink(links).id(d => d.id).distance(80).strength(0.8))
+            .force('charge', d3.forceManyBody().strength(-180).distanceMax(350))
             .force('center', d3.forceCenter(width / 2, height / 2))
-            .force('collision', d3.forceCollide().radius(d => d.type === 'vendor' ? 40 : 20))
-            .force('x', d3.forceX(width / 2).strength(0.05))
-            .force('y', d3.forceY(height / 2).strength(0.05));
+            .force('collision', d3.forceCollide().radius(d => d.type === 'vendor' ? 28 : 16).strength(0.7))
+            .force('x', d3.forceX(width / 2).strength(0.12))
+            .force('y', d3.forceY(height / 2).strength(0.12))
+            .alphaDecay(0.025);   // slower decay → more time to settle
 
         simulationRef.current = simulation;
 
@@ -360,25 +362,31 @@ export default function GraphVisualization({ onSelectVendor }) {
             node.attr('transform', d => `translate(${d.x},${d.y})`);
         });
 
-        // Zoom to fit after simulation settles
-        simulation.on('end', () => {
+        // Zoom to fit — fires when simulation cools AND as a safety timer.
+        const zoomToFit = () => {
             const bounds = g.node().getBBox();
-            const fullWidth = width;
-            const fullHeight = height;
-            const bWidth = bounds.width;
-            const bHeight = bounds.height;
-            const scale = 0.85 / Math.max(bWidth / fullWidth, bHeight / fullHeight);
-            const tx = fullWidth / 2 - scale * (bounds.x + bWidth / 2);
-            const ty = fullHeight / 2 - scale * (bounds.y + bHeight / 2);
-
+            if (!bounds.width || !bounds.height) return;
+            const pad = 40;
+            const scale = Math.min(
+                (width - pad * 2) / bounds.width,
+                (height - pad * 2) / bounds.height,
+                2   // never zoom in past 2×
+            );
+            const tx = width / 2 - scale * (bounds.x + bounds.width / 2);
+            const ty = height / 2 - scale * (bounds.y + bounds.height / 2);
             svg.transition().duration(750).call(
                 zoom.transform,
                 d3.zoomIdentity.translate(tx, ty).scale(scale)
             );
-        });
+        };
+
+        simulation.on('end', zoomToFit);
+        // Safety: also zoom after 2.5 s even if simulation never "ends"
+        const fitTimer = setTimeout(zoomToFit, 2500);
 
         return () => {
             simulation.stop();
+            clearTimeout(fitTimer);
         };
     }, [getFilteredData]);
 
